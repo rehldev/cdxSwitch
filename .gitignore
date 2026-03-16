@@ -1,0 +1,14 @@
+
+# Codex local configuration
+.codex/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.temp/
