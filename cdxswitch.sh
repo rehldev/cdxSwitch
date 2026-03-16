@@ -64,6 +64,23 @@ get_keyring_account() {
     echo "cli|$hash"
 }
 
+# Decode JWT payload (base64url -> JSON)
+decode_jwt_payload() {
+    local jwt="$1"
+    local payload
+    payload=$(echo "$jwt" | cut -d. -f2)
+    # Add base64 padding
+    local pad=$(( 4 - ${#payload} % 4 ))
+    if [[ $pad -lt 4 ]]; then
+        local i
+        for (( i=0; i<pad; i++ )); do
+            payload="${payload}="
+        done
+    fi
+    # Replace URL-safe characters and decode
+    echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null
+}
+
 # Basic validation that JSON is valid
 validate_json() {
     local file="$1"
@@ -208,8 +225,11 @@ get_current_account() {
 
     case "$auth_mode" in
         chatgpt|chatgptAuthTokens)
-            local email
-            email=$(jq -r '.tokens.id_token.email // empty' "$auth_path" 2>/dev/null)
+            local id_token email
+            id_token=$(jq -r '.tokens.id_token // empty' "$auth_path" 2>/dev/null)
+            if [[ -n "$id_token" ]]; then
+                email=$(decode_jwt_payload "$id_token" | jq -r '.email // empty' 2>/dev/null)
+            fi
             echo "${email:-none}"
             ;;
         apikey)
@@ -398,10 +418,17 @@ cmd_add_account() {
         exit 1
     fi
 
-    # Get user ID from auth.json
-    local user_id auth_path
+    # Get user ID from auth.json (decode JWT to extract chatgpt_user_id)
+    local user_id auth_path id_token
     auth_path=$(get_codex_auth_path)
-    user_id=$(jq -r '.tokens.id_token.chatgpt_user_id // .tokens.account_id // "unknown"' "$auth_path" 2>/dev/null || echo "unknown")
+    user_id="unknown"
+    id_token=$(jq -r '.tokens.id_token // empty' "$auth_path" 2>/dev/null)
+    if [[ -n "$id_token" ]]; then
+        user_id=$(decode_jwt_payload "$id_token" | jq -r '."https://api.openai.com/auth".chatgpt_user_id // .sub // "unknown"' 2>/dev/null || echo "unknown")
+    fi
+    if [[ "$user_id" == "unknown" ]]; then
+        user_id=$(jq -r '.tokens.account_id // "unknown"' "$auth_path" 2>/dev/null || echo "unknown")
+    fi
 
     # Store backup
     write_account_credentials "$account_num" "$current_email" "$current_creds"

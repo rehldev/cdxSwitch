@@ -102,6 +102,23 @@ function Copy-Value {
     return ConvertTo-NativeObject $Value
 }
 
+function Decode-JwtPayload {
+    param([string]$Jwt)
+    $parts = $Jwt.Split('.')
+    if ($parts.Count -lt 2) { return $null }
+    $payload = $parts[1]
+    # Add base64 padding
+    $pad = 4 - ($payload.Length % 4)
+    if ($pad -lt 4) {
+        $payload += ('=' * $pad)
+    }
+    # Replace URL-safe characters
+    $payload = $payload.Replace('-', '+').Replace('_', '/')
+    $bytes = [Convert]::FromBase64String($payload)
+    $json = [System.Text.Encoding]::UTF8.GetString($bytes)
+    return ConvertTo-NativeObject ($json | ConvertFrom-Json)
+}
+
 function Get-CurrentAccount {
     $authPath = Get-CodexAuthPath
     if (-not (Test-Path -LiteralPath $authPath)) {
@@ -119,30 +136,14 @@ function Get-CurrentAccount {
     }
 
     switch ($authMode) {
-        "chatgpt" {
+        { $_ -in "chatgpt", "chatgptAuthTokens" } {
             $email = $null
             if ($auth.ContainsKey("tokens") -and $auth.tokens -is [System.Collections.IDictionary]) {
                 $tokens = $auth.tokens
-                if ($tokens.ContainsKey("id_token") -and $tokens.id_token -is [System.Collections.IDictionary]) {
-                    $idToken = $tokens.id_token
-                    if ($idToken.ContainsKey("email")) {
-                        $email = [string]$idToken.email
-                    }
-                }
-            }
-            if (-not [string]::IsNullOrWhiteSpace($email)) {
-                return $email
-            }
-            return "none"
-        }
-        "chatgptAuthTokens" {
-            $email = $null
-            if ($auth.ContainsKey("tokens") -and $auth.tokens -is [System.Collections.IDictionary]) {
-                $tokens = $auth.tokens
-                if ($tokens.ContainsKey("id_token") -and $tokens.id_token -is [System.Collections.IDictionary]) {
-                    $idToken = $tokens.id_token
-                    if ($idToken.ContainsKey("email")) {
-                        $email = [string]$idToken.email
+                if ($tokens.ContainsKey("id_token") -and -not [string]::IsNullOrWhiteSpace([string]$tokens.id_token)) {
+                    $decoded = Decode-JwtPayload ([string]$tokens.id_token)
+                    if ($null -ne $decoded -and $decoded -is [System.Collections.IDictionary] -and $decoded.ContainsKey("email")) {
+                        $email = [string]$decoded.email
                     }
                 }
             }
@@ -443,16 +444,22 @@ function Add-AccountCommand {
         throw "Error: No credentials found for current account"
     }
 
-    # Get user ID from auth.json
+    # Get user ID from auth.json (decode JWT to extract chatgpt_user_id)
     $authPath = Get-CodexAuthPath
     $auth = Read-JsonFile $authPath
     $userId = "unknown"
     if ($auth.ContainsKey("tokens") -and $auth.tokens -is [System.Collections.IDictionary]) {
         $tokens = $auth.tokens
-        if ($tokens.ContainsKey("id_token") -and $tokens.id_token -is [System.Collections.IDictionary]) {
-            $idToken = $tokens.id_token
-            if ($idToken.ContainsKey("chatgpt_user_id")) {
-                $userId = [string]$idToken.chatgpt_user_id
+        if ($tokens.ContainsKey("id_token") -and -not [string]::IsNullOrWhiteSpace([string]$tokens.id_token)) {
+            $decoded = Decode-JwtPayload ([string]$tokens.id_token)
+            if ($null -ne $decoded -and $decoded -is [System.Collections.IDictionary]) {
+                $authClaim = $null
+                if ($decoded.ContainsKey("https://api.openai.com/auth")) {
+                    $authClaim = $decoded["https://api.openai.com/auth"]
+                }
+                if ($null -ne $authClaim -and $authClaim -is [System.Collections.IDictionary] -and $authClaim.ContainsKey("chatgpt_user_id")) {
+                    $userId = [string]$authClaim.chatgpt_user_id
+                }
             }
         }
         if ($userId -eq "unknown" -and $tokens.ContainsKey("account_id")) {
