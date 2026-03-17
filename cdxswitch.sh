@@ -81,6 +81,28 @@ decode_jwt_payload() {
     echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null
 }
 
+# Detect and decode hex-encoded strings from macOS Keychain
+# macOS `security find-generic-password -w` can return hex when the stored
+# value contains non-ASCII or was written by a Rust keyring crate.
+maybe_decode_hex() {
+    local input="$1"
+    # Check if it looks like hex: even length, only hex chars, starts with 7b ({)
+    if [[ ${#input} -ge 4 && $((${#input} % 2)) -eq 0 && "$input" =~ ^[0-9a-fA-F]+$ ]]; then
+        local first_two="${input:0:2}"
+        if [[ "$first_two" == "7b" || "$first_two" == "7B" ]]; then
+            # Looks like hex-encoded JSON — decode it
+            local decoded
+            decoded=$(printf '%s' "$input" | xxd -r -p 2>/dev/null)
+            if [[ $? -eq 0 ]] && echo "$decoded" | jq . >/dev/null 2>&1; then
+                printf '%s' "$decoded"
+                return
+            fi
+        fi
+    fi
+    # Not hex or decode failed — return as-is
+    printf '%s' "$input"
+}
+
 # Basic validation that JSON is valid
 validate_json() {
     local file="$1"
@@ -258,7 +280,7 @@ read_credentials() {
             keyring_account=$(get_keyring_account)
             creds=$(security find-generic-password -s "$DEFAULT_KEYCHAIN_SERVICE" -a "$keyring_account" -w 2>/dev/null || true)
             if [[ -n "$creds" ]]; then
-                printf '%s' "$creds"
+                maybe_decode_hex "$creds"
                 return
             fi
             # Fall back to file
@@ -320,7 +342,13 @@ read_account_credentials() {
 
     case "$platform" in
         macos)
-            security find-generic-password -s "Codex Auth-Account-${account_num}-${email}" -w 2>/dev/null || echo ""
+            local acct_creds
+            acct_creds=$(security find-generic-password -s "Codex Auth-Account-${account_num}-${email}" -w 2>/dev/null || true)
+            if [[ -n "$acct_creds" ]]; then
+                maybe_decode_hex "$acct_creds"
+            else
+                echo ""
+            fi
             ;;
         linux|wsl)
             local cred_file="$BACKUP_DIR/credentials/.codex-auth-${account_num}-${email}.json"
